@@ -14,4 +14,10 @@ the **libsndfile** directory contains a HEAVILY MODIFIED version of the original
 the changes made are detailed here:
 
 - disables Vorbis and FLAC support, in order to reduce final .wasm file.
-- makes compilation easier by using prebuilt libraries, rather 
+
+furthermore **opus** is probably modified too, but I am not sure.
+
+# how to build
+
+first build ogg and libopus, in that exact order. the libraries SHALL be in `deps/`.
+after that you can build as a normal CMake project, but use the Emscripten toolchain.

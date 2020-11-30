@@ -1,0 +1,10 @@
+build/
+deps/
+opus/build
+libogg/wellfk
+libvorbis/build
+*.a
+*.so
+*.la
+*.o
+*.lo

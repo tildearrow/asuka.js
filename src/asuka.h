@@ -26,6 +26,9 @@ enum {
   fxConf,
   fxHail,
   fxSand,
+  fxSleep,
+  fxRain,
+  fxRainHeavy,
   fxMax
 };
 

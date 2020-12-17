@@ -12,6 +12,12 @@ bool audioUp=false;
 
 bool effects[fxMax];
 
+#define CHECK_SUSPEND \
+  if (audioUp) { \
+    suspendTime=ar.freq*2; \
+    SDL_PauseAudioDevice(ai,0); \
+  }
+
 // EFFECT VARIABLE BEGIN //
 
 struct fxConfStateS {
@@ -45,6 +51,30 @@ struct fxSandStateS {
   }
 } fxSandState;
 
+struct fxSleepStateS {
+  float val;
+  fxSleepStateS(): val(1) {}
+} fxSleepState;
+
+struct Droplet {
+  float vol;
+  unsigned short pos, freq;
+  signed char life;
+  Droplet(bool val): freq(521+(rand()%20871)), vol((float(rand()%64)/128.0f)), pos(0), life(0) {}
+  Droplet(): freq(521+(rand()%20871)), vol((float(rand()%64)/512.0f)), pos(0), life(0) {}
+};
+
+struct fxRainStateS {
+  Droplet drops[256];
+  unsigned char dropsBegin=0, dropsEnd=0;
+  float* prebuf;
+  float* postbuf;
+
+  float vol;
+} fxRainState;
+
+float dropletVol[128];
+
 // EFFECT VARIABLE END //
 
 std::vector<Music*> mus;
@@ -52,6 +82,8 @@ std::vector<Sound*> snd;
 int sndc=-1;
 
 int bufSize=1024;
+
+int suspendTime=100000;
 
 char dstr[4096];
 
@@ -77,6 +109,7 @@ static void process(void* d, Uint8* stream, int len) {
   float* buf[2];
   int coff;
   bool warned=false;
+  bool audible=false;
   buf[0]=(float*)stream;
   buf[1]=(float*)(&buf[0][1]);
   memset(stream,0,len);
@@ -94,6 +127,14 @@ static void process(void* d, Uint8* stream, int len) {
       }
       fxConfState.val=1+sinT[(fxConfState.pos>>3)&0x3ff]*fxConfState.amp;
       fxConfState.pos++;
+      
+      if (effects[fxSleep]) {
+        fxSleepState.val-=0.00001;
+        if (fxSleepState.val<0) fxSleepState.val=0;
+      } else {
+        fxSleepState.val+=0.00001;
+        if (fxSleepState.val>1) fxSleepState.val=1;
+      }
   
       // put sample
       if (!h->playing || h->dcPosR==h->dcPosW) { // we have no data
@@ -101,7 +142,8 @@ static void process(void* d, Uint8* stream, int len) {
           warned=true;
         }
       } else {
-        h->dcPosRLow+=h->rate*h->speed*fxConfState.val;
+        audible=true;
+        h->dcPosRLow+=h->rate*h->speed*fxConfState.val*fxSleepState.val;
         while (h->dcPosRLow>=ar.freq && h->dcPosR!=h->dcPosW) {
           h->dcPosRLow-=ar.freq;
           h->cubint[0][0]=h->cubint[0][1];
@@ -138,6 +180,7 @@ static void process(void* d, Uint8* stream, int len) {
           break;
         }
       } else {
+        audible=true;
         h->dcPosRLow+=h->rate*h->speed;
         while (h->dcPosRLow>=ar.freq && h->dcPosR!=h->dcPosW) {
           h->dcPosRLow-=ar.freq;
@@ -194,6 +237,7 @@ static void process(void* d, Uint8* stream, int len) {
       if (fxSandState.amp<0) fxSandState.amp=0;
     }
     if (fxSandState.amp>0) {
+      audible=true;
       if (--fxSandState.nextCutIn<0) {
         fxSandState.nextCut=0.05+(float(rand()%256)/256)*0.4;
         fxSandState.nextCutIn=12000;
@@ -210,6 +254,70 @@ static void process(void* d, Uint8* stream, int len) {
       fxSandState.p1[1]+=fxSandState.cut*(fxSandState.p0[1]-fxSandState.p1[1]);
       buf[1][i<<1]+=fxSandState.p1[1]*fxSandState.amp;
     }
+
+    if (effects[fxRain]) {
+      fxRainState.vol+=0.00005;
+      if (fxRainState.vol>1.5) fxRainState.vol=1.5;
+    } else {
+      fxRainState.vol-=0.00005;
+      if (fxRainState.vol<0) fxRainState.vol=0;
+    }
+
+    if (fxRainState.vol>0) {
+      audible=true;
+      if (effects[fxRainHeavy]) {
+        // background
+        if ((rand()&3)==0) {
+          fxRainState.drops[++fxRainState.dropsEnd]=Droplet();
+        }
+  
+        // foreground
+        if ((rand()&63)==0) {
+          fxRainState.drops[++fxRainState.dropsEnd]=Droplet(true);
+        }
+      } else {
+        // background
+        if ((rand()&15)==0) {
+          fxRainState.drops[++fxRainState.dropsEnd]=Droplet();
+        }
+  
+        // foreground
+        if ((rand()&255)==0) {
+          fxRainState.drops[++fxRainState.dropsEnd]=Droplet(true);
+        }
+      }
+
+      // process
+      float s=0;
+      for (unsigned char j=fxRainState.dropsBegin; j!=fxRainState.dropsEnd; j++) {
+        s+=sinT[fxRainState.drops[j].pos>>6]*fxRainState.drops[j].vol*dropletVol[fxRainState.drops[j].life++];
+
+        fxRainState.drops[j].pos+=fxRainState.drops[j].freq;
+        fxRainState.drops[j].freq+=70;
+
+        if (fxRainState.drops[j].life<0) fxRainState.dropsBegin++;
+      }
+      fxRainState.prebuf[i<<1]=s;
+      fxRainState.prebuf[1+(i<<1)]=s;
+    }
+  }
+
+  if (fxRainState.vol>0) {
+    for (int i=0; i<nframes; i++) {
+      buf[0][i<<1]+=fxRainState.vol*(fxRainState.prebuf[i<<1]*0.5);
+      buf[1][i<<1]+=fxRainState.vol*(fxRainState.prebuf[1+(i<<1)]*0.5);
+    }
+  }
+
+  // check if we can suspend
+  if (audible) {
+    suspendTime=ar.freq*2;
+  } else {
+    suspendTime-=ar.samples;
+    if (suspendTime<0) {
+      printf("suspending audio engine.\n");
+      SDL_PauseAudioDevice(ai,1);
+    }
   }
 }
 
@@ -218,6 +326,7 @@ float getMusicSpeed(int scene, int id) {
 }
 
 void setMusicSpeed(int scene, int id, float speed) {
+  CHECK_SUSPEND
   findMusic(id)->speed=speed;
 }
 
@@ -239,22 +348,35 @@ int initAudio() {
     printf("failed to init audio.\n");
     return 0;
   }
+  fxRainState.prebuf=new float[ar.samples*ar.channels];
+  fxRainState.postbuf=new float[ar.samples*ar.channels];
+
+  float v=1;
+  for (int i=0; i<128; i++) {
+    v*=0.92;
+    dropletVol[i]=v;
+  }
+
   audioUp=true;
 
+  suspendTime=ar.freq*2;
   SDL_PauseAudioDevice(ai,0);
   
   return 1;
 }
 
 void play(int scene, int id) {
+  CHECK_SUSPEND
   findMusic(id)->play();
 }
 
 void stop(int scene, int id) {
+  CHECK_SUSPEND
   findMusic(id)->stop();
 }
 
 void goBegin(int scene, int id) {
+  CHECK_SUSPEND
   findMusic(id)->goBegin();
 }
 
@@ -263,6 +385,7 @@ int playSound(int scene, string path) {
     printf("first loading audio\n");
     if (!initAudio()) return -1;
   }
+  CHECK_SUSPEND
   Sound* s=new Sound(++sndc);
   s->load(path);
   snd.push_back(s);
@@ -274,6 +397,7 @@ int playSoundVol(int scene, string path, float vol) {
     printf("first loading audio\n");
     if (!initAudio()) return -1;
   }
+  CHECK_SUSPEND
   Sound* s=new Sound(++sndc);
   s->volume=vol;
   s->load(path);
@@ -281,8 +405,23 @@ int playSoundVol(int scene, string path, float vol) {
   return sndc;
 }
 
+int playSoundEx(int scene, string path, float vol, float pitch) {
+  if (!audioUp) {
+    printf("first loading audio\n");
+    if (!initAudio()) return -1;
+  }
+  CHECK_SUSPEND
+  Sound* s=new Sound(++sndc);
+  s->volume=vol;
+  s->speed=pitch;
+  s->load(path);
+  snd.push_back(s);
+  return sndc;
+}
+
 void stopSound(int scene, int id) {
   Sound* s=findSound(id);
+  CHECK_SUSPEND
   if (s) s->killme=true;
 }
 
@@ -291,6 +430,7 @@ void loadSong(int scene, int id, string path) {
     printf("first loading audio\n");
     if (!initAudio()) return;
   }
+  CHECK_SUSPEND
   findMusic(id)->load(path);
 }
 
@@ -303,6 +443,7 @@ float getMusicVolume(int scene, int id) {
 }
 
 void setMusicVolume(int scene, int id, float v) {
+  CHECK_SUSPEND
   findMusic(id)->volume=v;
 }
 
@@ -313,13 +454,14 @@ bool getEffect(unsigned char id) {
 
 void setEffect(unsigned char id, bool value) {
   if (id<fxMax) {
+    CHECK_SUSPEND
     effects[id]=value;
   }
 }
 
 string debugInfo() {
   string d;
-  sprintf(dstr,"%d samples @ %dHz<br/>",ar.samples,ar.freq);
+  sprintf(dstr,"%d samples @ %dHz (%s)<br/>",ar.samples,ar.freq,(suspendTime<0)?("suspended"):("running"));
   d=dstr;
   sprintf(dstr,"object: %lu | hash: %lu | music: %lu | sound: %lu<br/>objects:<br/>",man.items.size(),sman.items.size(),mus.size(),snd.size());
   d+=dstr;
@@ -355,6 +497,7 @@ EMSCRIPTEN_BINDINGS(asuka) {
   emscripten::function("play",&play);
   emscripten::function("playSound",&playSound);
   emscripten::function("playSoundVol",&playSoundVol);
+  emscripten::function("playSoundEx",&playSoundEx);
   emscripten::function("stop",&stop);
   emscripten::function("stopSound",&stopSound);
   emscripten::function("goBegin",&goBegin);
